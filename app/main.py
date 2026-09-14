@@ -8,8 +8,8 @@ from fastapi.staticfiles import StaticFiles
 
 from . import config as C
 from . import history
-from .api import router
-from .rag import build_or_load_index, build_query_engine, setup_settings
+from app.api import router
+from app.rag import build_or_load_index, build_query_engine, setup_settings
 
 logging.basicConfig(
     level=logging.INFO,

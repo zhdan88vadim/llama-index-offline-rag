@@ -4,6 +4,8 @@ from llama_index.core import PromptTemplate, VectorStoreIndex
 from llama_index.core.query_engine import RetrieverQueryEngine
 from llama_index.core.retrievers import VectorIndexRetriever, QueryFusionRetriever
 from llama_index.postprocessor.flag_embedding_reranker import FlagEmbeddingReranker
+from llama_index.core.retrievers.fusion_retriever import FUSION_MODES
+
 
 from .. import config as C
 from ..schemas import AnswerStatus, SourceNode
@@ -21,11 +23,13 @@ def build_query_engine(index: VectorStoreIndex) -> RetrieverQueryEngine:
 
     vector_retriever = VectorIndexRetriever(index=index, similarity_top_k=15)
 
+    mode: FUSION_MODES = FUSION_MODES.RECIPROCAL_RANK
+
     hybrid = QueryFusionRetriever(
         [vector_retriever, bm25_retriever],
         similarity_top_k=10,
         num_queries=1,
-        mode="reciprocal_rerank",
+        mode=mode,
         use_async=False,
         verbose=False,
     )
