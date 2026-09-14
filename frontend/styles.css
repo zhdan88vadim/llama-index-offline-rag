@@ -54,3 +54,34 @@ body { font-family: system-ui, sans-serif; margin: 0; background: #f7f7f7; }
   background: #fee; border: 1px solid #fcc;
   border-radius: 6px; color: #900;
 }
+
+.answer-actions {
+  margin-top: 12px;
+}
+#reask-btn {
+  padding: 8px 16px;
+  background: #fff;
+  border: 1px solid #2563eb;
+  color: #2563eb;
+  border-radius: 6px;
+  cursor: pointer;
+  font-size: 14px;
+}
+#reask-btn:hover {
+  background: #eff6ff;
+}
+#reask-btn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.sidebar li.selected {
+  background: #e0ecff;
+  border-left: 3px solid #2563eb;
+  padding-left: 5px; /* компенсируем border, чтобы текст не сдвигался */
+  font-weight: 500;
+}
+
+.sidebar li.selected:hover {
+  background: #d6e4ff;
+}

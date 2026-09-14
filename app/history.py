@@ -62,7 +62,11 @@ def save_qa(
                 (ts, question, answer, sources_json, model, duration_ms, status),
             )
             conn.commit()
-            return int(cur.lastrowid)
+            rowid = cur.lastrowid
+            if rowid is None:
+                log.warning("save_qa: lastrowid is None")
+                return -1
+            return int(rowid)
         except Exception as e:
             log.warning("save_qa failed: %s", e)
             return -1

@@ -6,3 +6,5 @@ storage/
 data/
 .env
 *.db
+TODO/
+.idea/

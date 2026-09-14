@@ -406,7 +406,7 @@ def build_query_engine(index: VectorStoreIndex) -> RetrieverQueryEngine:
 
     hybrid = QueryFusionRetriever(
         [vector_retriever, bm25_retriever],
-        similarity_top_k=6,
+        similarity_top_k=10,
         num_queries=1,
         mode="reciprocal_rerank",
         use_async=False,
@@ -414,8 +414,9 @@ def build_query_engine(index: VectorStoreIndex) -> RetrieverQueryEngine:
     )
 
     qa_prompt = PromptTemplate(
-        "Ты — ассистент по внутренним политикам. Отвечай ТОЛЬКО по контексту. "
-        "Если ответа нет — скажи 'В документах нет информации'.\n\n"
+        "Ты — ассистент по внутренним политикам. Используй ТОЛЬКО информацию из контекста.\n"
+        "Если в контексте есть прямой ответ — дай его. Если ответа действительно нет — "
+        "напиши 'В документах нет информации'.\n\n"
         "Контекст:\n{context_str}\n\nВопрос: {query_str}\nОтвет:"
     )
 

@@ -1,4 +1,6 @@
 const $ = (id) => document.getElementById(id);
+let currentQuestion = null;
+let selectedHistoryId = null;
 
 async function ask(question) {
   $("loading").classList.remove("hidden");
@@ -13,10 +15,16 @@ async function ask(question) {
     });
     if (!res.ok) {
       const err = await res.json().catch(() => ({}));
-      throw new Error(err?.detail?.message || `HTTP ${res.status}`);
+      const detail = err?.detail;
+      const msg = (detail && typeof detail === "object" && "message" in detail)
+        ? detail.message
+        : `HTTP ${res.status}`;
+      throw new Error(msg);
     }
     const data = await res.json();
     renderAnswer(data);
+    currentQuestion = data.question ?? question;
+    selectedHistoryId = data.history_id;
     await loadHistory();
   } catch (e) {
     $("error").textContent = `Ошибка: ${e.message}`;
@@ -56,7 +64,9 @@ async function loadHistory() {
     const li = document.createElement("li");
     li.textContent = item.question_preview;
     li.title = item.timestamp;
-    li.className = item.status === "no_info" ? "no-info" : "";
+    li.dataset.id = String(item.id);
+    if (item.status === "no_info") li.classList.add("no-info");
+    if (item.id === selectedHistoryId) li.classList.add("selected");
     li.onclick = () => openHistory(item.id);
     ul.appendChild(li);
   }
@@ -66,6 +76,15 @@ async function openHistory(id) {
   const res = await fetch(`/api/history/${id}`);
   if (!res.ok) return;
   const data = await res.json();
+
+  currentQuestion = data.question ?? null;
+  selectedHistoryId = id;
+
+  document.querySelectorAll("#history-list li.selected")
+    .forEach(el => el.classList.remove("selected"));
+  const li = document.querySelector(`#history-list li[data-id="${id}"]`);
+  if (li) li.classList.add("selected");
+
   renderAnswer(data);
 }
 
@@ -80,7 +99,24 @@ $("search").addEventListener("input", () => loadHistory());
 $("clear-history").addEventListener("click", async () => {
   if (!confirm("Удалить всю историю?")) return;
   await fetch("/api/history", { method: "DELETE" });
+
+  selectedHistoryId = null;
+  currentQuestion = null;
+  $("answer-block").classList.add("hidden");
+  $("error").classList.add("hidden");
+
   await loadHistory();
+});
+
+$("reask-btn").addEventListener("click", async () => {
+  if (!currentQuestion) return;
+  const btn = $("reask-btn");
+  btn.disabled = true;
+  try {
+    await ask(currentQuestion);
+  } finally {
+    btn.disabled = false;
+  }
 });
 
 loadHistory();

@@ -1,10 +1,12 @@
 <!DOCTYPE html>
 <html lang="ru">
+
 <head>
   <meta charset="utf-8" />
   <title>PolicySearch</title>
   <link rel="stylesheet" href="/static/styles.css" />
 </head>
+
 <body>
   <div class="layout">
     <aside class="sidebar">
@@ -25,6 +27,9 @@
       <div id="answer-block" class="hidden">
         <h2>Ответ</h2>
         <div id="answer"></div>
+        <div class="answer-actions">
+          <button id="reask-btn" type="button">Спросить снова</button>
+        </div>
         <h3>Источники</h3>
         <ol id="sources"></ol>
       </div>
@@ -33,4 +38,5 @@
   </div>
   <script src="/static/app.js"></script>
 </body>
+
 </html>
