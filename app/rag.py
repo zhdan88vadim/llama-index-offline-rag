@@ -1,0 +1,465 @@
+import hashlib
+import json
+import logging
+from pathlib import Path
+from typing import List, Sequence
+
+from llama_index.core import (
+    SimpleDirectoryReader,
+    Settings,
+    VectorStoreIndex,
+    StorageContext,
+    load_index_from_storage,
+    PromptTemplate,
+)
+from llama_index.core.node_parser import MarkdownNodeParser, SentenceSplitter
+from llama_index.core.node_parser.interface import NodeParser
+from llama_index.core.schema import BaseNode, Document
+from llama_index.core.retrievers import VectorIndexRetriever, QueryFusionRetriever
+from llama_index.core.query_engine import RetrieverQueryEngine
+from llama_index.core.ingestion import IngestionPipeline
+from llama_index.core.storage.docstore import SimpleDocumentStore
+from llama_index.core.storage.index_store import SimpleIndexStore
+from llama_index.retrievers.bm25 import BM25Retriever
+from llama_index.embeddings.huggingface import HuggingFaceEmbedding
+from llama_index.llms.ollama import Ollama
+from llama_index.postprocessor.flag_embedding_reranker import FlagEmbeddingReranker
+from llama_index.readers.file import DocxReader
+from Stemmer import Stemmer
+
+import qdrant_client
+from llama_index.vector_stores.qdrant import QdrantVectorStore
+
+from bs4 import BeautifulSoup
+from pypdf import PdfReader
+
+from . import config as C
+from .schemas import SourceNode, AnswerStatus
+
+log = logging.getLogger("rag")
+
+
+# ─── Settings ───
+def setup_settings() -> None:
+    Settings.llm = Ollama(
+        model=C.RAG_MODEL,
+        base_url=C.OLLAMA_HOST,
+        temperature=0.0,
+        context_window=C.RAG_NUM_CTX,
+        request_timeout=C.RAG_TIMEOUT,
+    )
+    Settings.embed_model = HuggingFaceEmbedding(
+        model_name=C.EMBED_MODEL,
+        device=C.EMBED_DEVICE,
+        query_instruction="query: ",
+        text_instruction="passage: ",
+    )
+    Settings.node_parser = SentenceSplitter(
+        chunk_size=C.CHUNK_SIZE, chunk_overlap=C.CHUNK_OVERLAP
+    )
+
+
+# ─── Парсер ───
+class MarkdownThenSentence(NodeParser):
+    max_chunk_size: int = C.CHUNK_SIZE
+    overlap: int = C.CHUNK_OVERLAP
+    fallback_limit: int = C.MD_FALLBACK_LIMIT
+
+    inherit_keys: List[str] = [
+        "file_name", "file_path", "source", "source_rel",
+        "file_type", "file_size", "creation_date", "last_modified_date",
+        "page_start", "page_end", "title",
+    ]
+
+    def _parse_nodes(self, nodes: Sequence[BaseNode], show_progress: bool = False, **kwargs) -> List[BaseNode]:
+        md_parser = MarkdownNodeParser()
+        sentence_parser = SentenceSplitter(
+            chunk_size=self.max_chunk_size, chunk_overlap=self.overlap
+        )
+        parent_meta = {n.node_id: dict(n.metadata or {}) for n in nodes}
+        md_nodes = md_parser._parse_nodes(nodes, show_progress=show_progress, **kwargs)
+        self._restore_metadata(md_nodes, parent_meta)
+
+        small: List[BaseNode] = []
+        big: List[BaseNode] = []
+        for n in md_nodes:
+            (big if len(n.text) > self.fallback_limit else small).append(n)
+
+        if big:
+            sub_nodes = sentence_parser._parse_nodes(big, show_progress=show_progress, **kwargs)
+            self._restore_metadata(sub_nodes, {n.node_id: n.metadata for n in big})
+            small.extend(sub_nodes)
+        return small
+
+    def _restore_metadata(self, nodes: List[BaseNode], parent_meta: dict) -> None:
+        for n in nodes:
+            ref = getattr(n, "ref_doc_id", None)
+            meta = parent_meta.get(ref) if ref and ref in parent_meta else {}
+            if not meta:
+                for m in parent_meta.values():
+                    meta.update(m)
+            for k in self.inherit_keys:
+                if k in meta and k not in n.metadata:
+                    n.metadata[k] = meta[k]
+
+
+# ─── Manifest ───
+def file_hash(path: Path) -> str:
+    h = hashlib.sha256()
+    with open(path, "rb") as f:
+        for chunk in iter(lambda: f.read(65536), b""):
+            h.update(chunk)
+    return h.hexdigest()
+
+
+def load_manifest() -> dict:
+    if C.MANIFEST_PATH.exists():
+        try:
+            return json.loads(C.MANIFEST_PATH.read_text(encoding="utf-8"))
+        except Exception as e:
+            log.warning("Manifest read failed: %s", e)
+    return {}
+
+
+def save_manifest(m: dict) -> None:
+    C.PERSIST_DIR.mkdir(parents=True, exist_ok=True)
+    C.MANIFEST_PATH.write_text(
+        json.dumps(m, ensure_ascii=False, indent=2), encoding="utf-8"
+    )
+
+
+def scan_files() -> dict:
+    out = {}
+    for p in C.DATA_PATH.rglob("*"):
+        if p.is_file() and p.suffix.lower() in C.SUPPORTED_EXTS:
+            rel = str(p.relative_to(C.DATA_PATH)).replace("\\", "/")
+            try:
+                out[rel] = file_hash(p)
+            except OSError as e:
+                log.warning("Не удалось прочитать %s: %s", p, e)
+    return out
+
+
+# ─── Qdrant ───
+def get_qdrant_client() -> qdrant_client.QdrantClient:
+    C.QDRANT_PATH.mkdir(parents=True, exist_ok=True)
+    return qdrant_client.QdrantClient(path=str(C.QDRANT_PATH))
+
+
+def get_vector_store() -> QdrantVectorStore:
+    return QdrantVectorStore(client=get_qdrant_client(), collection_name=C.QDRANT_COLLECTION)
+
+
+def get_storage_context() -> StorageContext:
+    C.PERSIST_DIR.mkdir(parents=True, exist_ok=True)
+    return StorageContext.from_defaults(
+        vector_store=get_vector_store(),
+        docstore=SimpleDocumentStore(),
+        index_store=SimpleIndexStore(),
+    )
+
+
+# ─── Ingestion pipeline ───
+def build_pipeline(docstore, vector_store) -> IngestionPipeline:
+    return IngestionPipeline(
+        transformations=[
+            MarkdownThenSentence(
+                max_chunk_size=C.CHUNK_SIZE,
+                overlap=C.CHUNK_OVERLAP,
+                fallback_limit=C.MD_FALLBACK_LIMIT,
+            ),
+        ],
+        docstore=docstore,
+        vector_store=vector_store,
+    )
+
+
+# ─── Извлечение PDF (только текстовый слой) ───
+def _extract_pdf(path: Path) -> list[tuple[int | None, str]]:
+    try:
+        reader = PdfReader(str(path))
+    except Exception as e:
+        log.warning("PDF read failed %s: %s", path, e)
+        return []
+    pages: list[tuple[int | None, str]] = []
+    for i, page in enumerate(reader.pages, start=1):
+        text = (page.extract_text() or "").strip()
+        if text:
+            pages.append((i, text))
+    joined = "".join(t for _, t in pages)
+    if len(joined) < C.PDF_MIN_CHARS:
+        log.info("PDF %s: текстовый слой отсутствует, пропускаем", path.name)
+        return []
+    return pages
+
+
+# ─── Извлечение HTML ───
+def _extract_html(path: Path) -> list[tuple[int | None, str]]:
+    try:
+        raw = path.read_bytes().decode("utf-8", errors="replace")
+    except Exception as e:
+        log.warning("HTML read failed %s: %s", path, e)
+        return []
+
+    soup = BeautifulSoup(raw, "html.parser")
+    for tag in soup(["script", "style"]):
+        tag.decompose()
+    clean_text = soup.get_text(separator="\n", strip=True).strip()
+
+    if len(clean_text) < C.HTML_MIN_CHARS:
+        log.info("HTML %s: пустой текст, пропускаем", path.name)
+        return []
+    return [(None, clean_text)]
+
+
+# ─── Загрузка документов ───
+def load_documents(rel_paths: List[str]) -> List[Document]:
+    if not rel_paths:
+        return []
+
+    standard = [r for r in rel_paths if Path(r).suffix.lower() in (".md", ".docx")]
+    custom = [r for r in rel_paths if Path(r).suffix.lower() in (".pdf", ".html", ".htm")]
+
+    docs: list[Document] = []
+
+    if standard:
+        reader = SimpleDirectoryReader(
+            input_files=[str(C.DATA_PATH / r) for r in standard],
+            file_extractor={".docx": DocxReader()},
+            filename_as_id=True,
+        )
+        for d in reader.load_data():
+            fp = Path(d.metadata.get("file_path", "")).resolve()
+            try:
+                rel = str(fp.relative_to(C.DATA_PATH)).replace("\\", "/")
+            except ValueError:
+                rel = d.metadata.get("file_name", str(fp))
+            d.metadata["source"] = rel
+            d.metadata["source_rel"] = rel
+            d.metadata["file_name"] = rel
+            d.metadata["kind"] = fp.suffix.lower().lstrip(".")
+            d.doc_id = rel
+            d.id_ = rel
+            docs.append(d)
+
+    for rel in custom:
+        path = (C.DATA_PATH / rel).resolve()
+        suffix = path.suffix.lower()
+        if suffix == ".pdf":
+            pages = _extract_pdf(path)
+            kind = "pdf"
+        else:
+            pages = _extract_html(path)
+            kind = "html"
+
+        for page_no, text in pages:
+            meta = {
+                "source": rel,
+                "source_rel": rel,
+                "file_name": rel,
+                "file_path": str(path),
+                "file_type": suffix.lstrip("."),
+                "kind": kind,
+            }
+            if page_no is not None:
+                meta["page_start"] = page_no
+                meta["page_end"] = page_no
+            doc = Document(text=text, metadata=meta)
+            doc_id = f"{rel}#p{page_no}" if page_no else rel
+            doc.doc_id = doc_id
+            doc.id_ = doc_id
+            docs.append(doc)
+
+    return docs
+
+
+# ─── Удаление документа ───
+def delete_document(index: VectorStoreIndex, doc_id: str) -> None:
+    docstore = index.docstore
+    node_ids: list[str] = []
+    try:
+        ref_info = docstore.get_ref_doc_info(doc_id)
+        if ref_info is not None:
+            node_ids = list(ref_info.node_ids)
+    except Exception:
+        pass
+
+    if node_ids:
+        try:
+            index.delete_nodes(node_ids, delete_from_docstore=True)
+        except Exception as e:
+            log.warning("delete_nodes(%s) failed: %s", doc_id, e)
+
+    try:
+        docstore.delete_document(doc_id, raise_error=False)
+    except Exception:
+        pass
+
+
+# ─── BM25 ───
+def build_and_persist_bm25(nodes: List[BaseNode]) -> BM25Retriever:
+    C.BM25_PERSIST_DIR.mkdir(parents=True, exist_ok=True)
+    retriever = BM25Retriever.from_defaults(
+        nodes=nodes, similarity_top_k=15,
+        stemmer=Stemmer("russian"), language="russian",
+    )
+    retriever.persist(str(C.BM25_PERSIST_DIR))
+    return retriever
+
+
+def load_bm25() -> BM25Retriever:
+    retriever = BM25Retriever.from_persist_dir(str(C.BM25_PERSIST_DIR))
+    retriever.similarity_top_k = 15
+    return retriever
+
+
+# ─── Sync ───
+def sync_index(index: VectorStoreIndex) -> dict:
+    pipeline = build_pipeline(index.docstore, index.storage_context.vector_store)
+    manifest = load_manifest()
+    current = scan_files()
+
+    current_ids = set(current.keys())
+    indexed_ids = set(manifest.keys())
+
+    added = sorted(current_ids - indexed_ids)
+    removed = sorted(indexed_ids - current_ids)
+    changed = sorted(i for i in (current_ids & indexed_ids) if current[i] != manifest[i])
+
+    log.info("Sync: added=%d changed=%d removed=%d", len(added), len(changed), len(removed))
+
+    for doc_id in removed + changed:
+        delete_document(index, doc_id)
+
+    to_load = added + changed
+    if to_load:
+        docs = load_documents(to_load)
+        if docs:
+            nodes = pipeline.run(documents=docs, show_progress=True)
+            log.info("Ingested %d node(s) из %d doc(s)", len(nodes), len(docs))
+
+    save_manifest(current)
+    index.storage_context.persist(str(C.PERSIST_DIR))
+
+    if added or changed or removed:
+        all_nodes = list(index.docstore.docs.values())
+        if all_nodes:
+            build_and_persist_bm25(all_nodes)
+
+    return {
+        "added": len(added),
+        "changed": len(changed),
+        "removed": len(removed),
+    }
+
+
+def build_or_load_index() -> VectorStoreIndex:
+    C.PERSIST_DIR.mkdir(parents=True, exist_ok=True)
+
+    persist_ready = (
+        (C.PERSIST_DIR / "docstore.json").exists()
+        and (C.PERSIST_DIR / "index_store.json").exists()
+    )
+
+    if persist_ready:
+        log.info("Загружаем индекс из %s", C.PERSIST_DIR)
+        storage = StorageContext.from_defaults(
+            vector_store=get_vector_store(),
+            docstore=SimpleDocumentStore.from_persist_dir(str(C.PERSIST_DIR)),
+            index_store=SimpleIndexStore.from_persist_dir(str(C.PERSIST_DIR)),
+        )
+        index = load_index_from_storage(storage)
+        sync_index(index)
+        return index
+
+    log.info("Первичная сборка индекса из %s", C.DATA_PATH)
+    current = scan_files()
+    if not current:
+        raise RuntimeError(
+            f"Не найдено документов в {C.DATA_PATH} (extensions: {C.SUPPORTED_EXTS})"
+        )
+
+    docs = load_documents(sorted(current.keys()))
+    storage = get_storage_context()
+    pipeline = build_pipeline(storage.docstore, storage.vector_store)
+    nodes = pipeline.run(documents=docs, show_progress=True)
+    log.info("Создано %d узлов", len(nodes))
+
+    index = VectorStoreIndex(nodes=nodes, storage_context=storage)
+    save_manifest(current)
+    index.storage_context.persist(str(C.PERSIST_DIR))
+    build_and_persist_bm25(nodes)
+    return index
+
+
+# ─── Query engine ───
+def build_query_engine(index: VectorStoreIndex) -> RetrieverQueryEngine:
+    if C.BM25_PERSIST_DIR.exists():
+        bm25_retriever = load_bm25()
+    else:
+        nodes = list(index.docstore.docs.values())
+        if not nodes:
+            raise RuntimeError("В индексе нет узлов — нечего искать.")
+        bm25_retriever = build_and_persist_bm25(nodes)
+
+    vector_retriever = VectorIndexRetriever(index=index, similarity_top_k=15)
+
+    hybrid = QueryFusionRetriever(
+        [vector_retriever, bm25_retriever],
+        similarity_top_k=6,
+        num_queries=1,
+        mode="reciprocal_rerank",
+        use_async=False,
+        verbose=False,
+    )
+
+    qa_prompt = PromptTemplate(
+        "Ты — ассистент по внутренним политикам. Отвечай ТОЛЬКО по контексту. "
+        "Если ответа нет — скажи 'В документах нет информации'.\n\n"
+        "Контекст:\n{context_str}\n\nВопрос: {query_str}\nОтвет:"
+    )
+
+    reranker = FlagEmbeddingReranker(model=C.RERANKER_MODEL, top_n=5)
+
+    return RetrieverQueryEngine.from_args(
+        retriever=hybrid,
+        node_postprocessors=[reranker],
+        response_mode="compact",
+        text_qa_template=qa_prompt,
+    )
+
+
+# ─── Сериализация ответа для API ───
+def serialize_sources(response) -> list[SourceNode]:
+    out: list[SourceNode] = []
+    for n in response.source_nodes:
+        meta = n.metadata or {}
+        src = (
+            meta.get("source_rel")
+            or meta.get("file_name")
+            or Path(meta.get("file_path", "")).name
+            or "unknown"
+        )
+        kind = meta.get("kind") or Path(src).suffix.lower().lstrip(".") or "md"
+        if kind == "htm":
+            kind = "html"
+        score = n.score if isinstance(n.score, (int, float)) else None
+        out.append(SourceNode(
+            id=str(getattr(n, "node_id", "") or ""),
+            source=str(src),
+            kind=kind,
+            score=float(score) if score is not None else None,
+            snippet=n.text[:300],
+            page_start=meta.get("page_start"),
+            page_end=meta.get("page_end"),
+            title=meta.get("title"),
+        ))
+    return out
+
+
+def detect_status(answer: str, sources: list[SourceNode]) -> AnswerStatus:
+    if "В документах нет информации" in answer:
+        return "no_info"
+    if not sources:
+        return "no_info"
+    return "ok"

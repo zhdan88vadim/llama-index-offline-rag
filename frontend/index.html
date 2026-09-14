@@ -1,0 +1,36 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8" />
+  <title>PolicySearch</title>
+  <link rel="stylesheet" href="/static/styles.css" />
+</head>
+<body>
+  <div class="layout">
+    <aside class="sidebar">
+      <h2>История</h2>
+      <input id="search" placeholder="Поиск по истории…" />
+      <ul id="history-list"></ul>
+      <button id="clear-history">Очистить всё</button>
+    </aside>
+
+    <main class="main">
+      <h1>PolicySearch</h1>
+      <form id="ask-form">
+        <textarea id="question" placeholder="Введите вопрос…" rows="3"></textarea>
+        <button type="submit" id="ask-btn">Спросить</button>
+      </form>
+
+      <div id="loading" class="hidden">Обработка…</div>
+      <div id="answer-block" class="hidden">
+        <h2>Ответ</h2>
+        <div id="answer"></div>
+        <h3>Источники</h3>
+        <ol id="sources"></ol>
+      </div>
+      <div id="error" class="hidden"></div>
+    </main>
+  </div>
+  <script src="/static/app.js"></script>
+</body>
+</html>

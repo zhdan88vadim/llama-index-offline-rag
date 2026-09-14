@@ -1,0 +1,14 @@
+fastapi>=0.110
+uvicorn[standard]>=0.29
+pydantic>=2.6
+llama-index-core>=0.11
+llama-index-retrievers-bm25>=0.3
+llama-index-embeddings-huggingface>=0.3
+llama-index-llms-ollama>=0.3
+llama-index-postprocessor-flag-embedding-reranker>=0.3
+llama-index-vector-stores-qdrant>=0.3
+llama-index-readers-file>=0.3
+qdrant-client>=1.9
+pypdf>=4.2
+beautifulsoup4>=4.12
+PyStemmer>=2.2
