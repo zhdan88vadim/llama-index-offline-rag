@@ -16,7 +16,7 @@ def file_hash(path: Path) -> str:
     return h.hexdigest()
 
 
-def load_manifest() -> dict:
+def load_manifest() -> dict[str, str]:
     if C.MANIFEST_PATH.exists():
         try:
             return json.loads(C.MANIFEST_PATH.read_text(encoding="utf-8"))
@@ -25,14 +25,14 @@ def load_manifest() -> dict:
     return {}
 
 
-def save_manifest(m: dict) -> None:
+def save_manifest(m: dict[str, str]) -> None:
     C.PERSIST_DIR.mkdir(parents=True, exist_ok=True)
-    C.MANIFEST_PATH.write_text(
-        json.dumps(m, ensure_ascii=False, indent=2), encoding="utf-8"
-    )
+    tmp = C.MANIFEST_PATH.with_suffix(".json.tmp")
+    tmp.write_text(json.dumps(m, ensure_ascii=False, indent=2), encoding="utf-8")
+    tmp.replace(C.MANIFEST_PATH)
 
 
-def scan_files() -> dict:
+def scan_files() -> dict[str, str]:
     out = {}
     for p in C.DATA_PATH.rglob("*"):
         if p.is_file() and p.suffix.lower() in C.SUPPORTED_EXTS:

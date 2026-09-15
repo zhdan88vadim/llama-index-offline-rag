@@ -1,14 +1,16 @@
 from pathlib import Path
 
-from llama_index.core import PromptTemplate, VectorStoreIndex
+from llama_index.core import VectorStoreIndex
 from llama_index.core.query_engine import RetrieverQueryEngine
 from llama_index.core.retrievers import VectorIndexRetriever, QueryFusionRetriever
 from llama_index.postprocessor.flag_embedding_reranker import FlagEmbeddingReranker
 from llama_index.core.retrievers.fusion_retriever import FUSION_MODES
+from llama_index.core.response_synthesizers import ResponseMode
 
+from app.rag.prompts import NO_INFO_PHRASE, QA_PROMPT
 
 from .. import config as C
-from ..schemas import AnswerStatus, SourceNode
+from ..schemas import AnswerStatus, SourceKind, SourceNode
 from .bm25 import build_and_persist_bm25, load_bm25
 
 
@@ -22,23 +24,14 @@ def build_query_engine(index: VectorStoreIndex) -> RetrieverQueryEngine:
         bm25_retriever = build_and_persist_bm25(nodes)
 
     vector_retriever = VectorIndexRetriever(index=index, similarity_top_k=15)
-
-    mode: FUSION_MODES = FUSION_MODES.RECIPROCAL_RANK
-
+    
     hybrid = QueryFusionRetriever(
         [vector_retriever, bm25_retriever],
         similarity_top_k=10,
         num_queries=1,
-        mode=mode,
+        mode=FUSION_MODES.RECIPROCAL_RANK,
         use_async=False,
         verbose=False,
-    )
-
-    qa_prompt = PromptTemplate(
-        "Ты — ассистент по внутренним политикам. Используй ТОЛЬКО информацию из контекста.\n"
-        "Если в контексте есть прямой ответ — дай его. Если ответа действительно нет — "
-        "напиши 'В документах нет информации'.\n\n"
-        "Контекст:\n{context_str}\n\nВопрос: {query_str}\nОтвет:"
     )
 
     reranker = FlagEmbeddingReranker(model=C.RERANKER_MODEL, top_n=5)
@@ -46,8 +39,8 @@ def build_query_engine(index: VectorStoreIndex) -> RetrieverQueryEngine:
     return RetrieverQueryEngine.from_args(
         retriever=hybrid,
         node_postprocessors=[reranker],
-        response_mode="compact",
-        text_qa_template=qa_prompt,
+        response_mode=ResponseMode.COMPACT,
+        text_qa_template=QA_PROMPT,
     )
 
 
@@ -61,9 +54,10 @@ def serialize_sources(response) -> list[SourceNode]:
             or Path(meta.get("file_path", "")).name
             or "unknown"
         )
-        kind = meta.get("kind") or Path(src).suffix.lower().lstrip(".") or "md"
-        if kind == "htm":
-            kind = "html"
+
+        raw_kind = meta.get("kind") or Path(src).suffix.lower().lstrip(".")
+        kind = SourceKind.from_string(raw_kind) if raw_kind else SourceKind.UNKNOWN
+
         score = n.score if isinstance(n.score, (int, float)) else None
         out.append(SourceNode(
             id=str(getattr(n, "node_id", "") or ""),
@@ -79,7 +73,7 @@ def serialize_sources(response) -> list[SourceNode]:
 
 
 def detect_status(answer: str, sources: list[SourceNode]) -> AnswerStatus:
-    if "В документах нет информации" in answer:
+    if NO_INFO_PHRASE in answer:
         return "no_info"
     if not sources:
         return "no_info"

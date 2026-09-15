@@ -5,7 +5,7 @@ from datetime import datetime, timezone
 from fastapi import APIRouter, HTTPException, Request
 
 from . import history
-from .rag import serialize_sources, detect_status
+from app.rag.engine import serialize_sources, detect_status
 from .schemas import (
     AskRequest, AskResponse,
     HistoryEntry, HistoryListResponse,

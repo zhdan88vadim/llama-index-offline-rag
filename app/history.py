@@ -28,7 +28,9 @@ CREATE INDEX IF NOT EXISTS idx_qa_ts ON qa_history(timestamp DESC);
 
 def _connect() -> sqlite3.Connection:
     HISTORY_DB_PATH.parent.mkdir(parents=True, exist_ok=True)
-    conn = sqlite3.connect(str(HISTORY_DB_PATH), check_same_thread=False)
+    conn = sqlite3.connect(str(HISTORY_DB_PATH))
+    conn.execute("PRAGMA journal_mode=WAL;")
+    conn.execute("PRAGMA synchronous=NORMAL;")
     conn.row_factory = sqlite3.Row
     return conn
 

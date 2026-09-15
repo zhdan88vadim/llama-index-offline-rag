@@ -8,6 +8,8 @@ from llama_index.core import (
 from llama_index.core.storage.docstore import SimpleDocumentStore
 from llama_index.core.storage.index_store import SimpleIndexStore
 
+from app.schemas import SyncStats
+
 from .. import config as C
 from .bm25 import build_and_persist_bm25
 from .loaders import load_documents
@@ -40,8 +42,7 @@ def delete_document(index: VectorStoreIndex, doc_id: str) -> None:
         pass
 
 
-def sync_index(index: VectorStoreIndex) -> dict:
-    pipeline = build_pipeline(index.docstore, index.storage_context.vector_store)
+def sync_index(index: VectorStoreIndex) -> SyncStats:
     manifest = load_manifest()
     current = scan_files()
 
@@ -62,6 +63,8 @@ def sync_index(index: VectorStoreIndex) -> dict:
     for doc_id in removed + changed:
         delete_document(index, doc_id)
 
+    pipeline = build_pipeline(index.docstore, index.storage_context.vector_store)
+
     to_load = added + changed
     if to_load:
         docs = load_documents(to_load)
@@ -69,8 +72,8 @@ def sync_index(index: VectorStoreIndex) -> dict:
             nodes = pipeline.run(documents=docs, show_progress=True)
             log.info("Ingested %d node(s) из %d doc(s)", len(nodes), len(docs))
 
-    save_manifest(current)
     index.storage_context.persist(str(C.PERSIST_DIR))
+    save_manifest(current)
 
     if added or changed or removed:
         all_nodes = list(index.docstore.docs.values())
@@ -99,7 +102,12 @@ def build_or_load_index() -> VectorStoreIndex:
             docstore=SimpleDocumentStore.from_persist_dir(str(C.PERSIST_DIR)),
             index_store=SimpleIndexStore.from_persist_dir(str(C.PERSIST_DIR)),
         )
-        index = load_index_from_storage(storage)
+        loaded = load_index_from_storage(storage)
+        if not isinstance(loaded, VectorStoreIndex):
+            raise RuntimeError(
+                f"В storage лежит {type(loaded).__name__}, а ожидался VectorStoreIndex"
+            )
+        index = loaded
         sync_index(index)
         return index
 
@@ -119,5 +127,5 @@ def build_or_load_index() -> VectorStoreIndex:
     index = VectorStoreIndex(nodes=nodes, storage_context=storage)
     save_manifest(current)
     index.storage_context.persist(str(C.PERSIST_DIR))
-    build_and_persist_bm25(nodes)
+    build_and_persist_bm25(list(nodes))
     return index

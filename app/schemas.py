@@ -1,8 +1,29 @@
-from typing import Literal
+from __future__ import annotations
+from enum import StrEnum
+from typing import Literal, TypedDict
 from pydantic import BaseModel, Field
 
 AnswerStatus = Literal["ok", "no_info", "error"]
-SourceKind = Literal["md", "docx", "pdf", "html"]
+
+class SyncStats(TypedDict):
+    added: int
+    changed: int
+    removed: int
+
+class SourceKind(StrEnum):
+    MD = "md"
+    DOCX = "docx"
+    PDF = "pdf"
+    HTML = "html"
+    UNKNOWN = "unknown"
+
+    @classmethod
+    def from_string(cls, value: str) ->  SourceKind:
+        cleaned = value.lower().strip()
+        try:
+            return cls(cleaned)
+        except ValueError:
+            return cls.UNKNOWN
 
 class ApiError(BaseModel):
     error: str

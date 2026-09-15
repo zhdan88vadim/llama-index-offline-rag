@@ -32,7 +32,8 @@ class MarkdownThenSentence(NodeParser):
         small: list[BaseNode] = []
         big: list[BaseNode] = []
         for n in md_nodes:
-            (big if len(n.text) > self.fallback_limit else small).append(n)
+            text = n.get_content() 
+            (big if len(text) > self.fallback_limit else small).append(n)
 
         if big:
             sub_nodes = sentence_parser._parse_nodes(
@@ -42,13 +43,26 @@ class MarkdownThenSentence(NodeParser):
             small.extend(sub_nodes)
         return small
 
-    def _restore_metadata(self, nodes: list[BaseNode], parent_meta: dict) -> None:
+    def _restore_metadata(
+        self, nodes: list[BaseNode], parent_meta: dict[str, dict]
+    ) -> None:
         for n in nodes:
             ref = getattr(n, "ref_doc_id", None)
-            meta = parent_meta.get(ref) if ref and ref in parent_meta else {}
+            meta: dict = {}
+            if ref and ref in parent_meta:
+                meta = parent_meta[ref]
+            else:
+                # fallback: ищем родителя по source_rel
+                src_rel = (n.metadata or {}).get("source_rel")
+                if src_rel:
+                    for m in parent_meta.values():
+                        if m.get("source_rel") == src_rel:
+                            meta = m
+                            break
+
             if not meta:
-                for m in parent_meta.values():
-                    meta.update(m)
+                continue
+
             for k in self.inherit_keys:
-                if k in meta and k not in n.metadata:
+                if k in meta and k not in (n.metadata or {}):
                     n.metadata[k] = meta[k]
